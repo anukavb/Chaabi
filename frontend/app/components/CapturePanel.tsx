@@ -113,9 +113,9 @@ export default function CapturePanel({
             </div>
           </div>
           <div className="flex items-center gap-[22px]">
-            <Stat label="SNR" value={`${readout.snr} dB`} />
+            <Stat label="RATE" value={`${readout.sampleRate} Hz`} />
             <Stat label="PEAK" value={`${readout.peak} dBFS`} />
-            <Stat label="F0" value={`${readout.f0} Hz`} />
+            <Stat label="FRAMES" value={readout.frames} />
           </div>
         </div>
 
@@ -124,8 +124,8 @@ export default function CapturePanel({
         </div>
 
         <div className="flex justify-between px-[22px] pb-3.5 font-mono text-[10px] tracking-[0.1em] text-[var(--muted)]">
-          <span>0 ms</span><span>200</span><span>400</span>
-          <span>600</span><span>800</span><span>1000 ms</span>
+          <span>0 ms</span><span>800</span><span>1600</span>
+          <span>2400</span><span>3200</span><span>4000 ms</span>
         </div>
       </section>
     </div>

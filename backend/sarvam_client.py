@@ -1,96 +1,123 @@
-"""
-Thin wrapper around the Sarvam AI SDK for the two things this module needs:
-  1. transcribe_codemix() - speech-to-text on the recorded challenge response
-  2. verify_intent()      - LLM check that the transcript matches the challenge
+"""Small, mockable Sarvam AI adapter used by the FastAPI integration."""
 
-Requires: pip install sarvamai
-Requires env var: SARVAM_API_KEY (get one at https://dashboard.sarvam.ai)
-"""
+from __future__ import annotations
+
 import os
+import re
 import tempfile
+import unicodedata
 
-from sarvamai import SarvamAI
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-# saaras:v4 is Sarvam's newest STT model (announced with multi-speaker support).
-# If your account/SDK version doesn't have v4 yet, fall back to "saaras:v3" -
-# both support mode="codemix". Override via env var without touching code.
 STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v4")
+STT_LANGUAGE_CODE = os.getenv("SARVAM_STT_LANGUAGE_CODE", "en-IN")
+STT_MODE = os.getenv("SARVAM_STT_MODE", "transcribe")
 LLM_MODEL = os.getenv("SARVAM_LLM_MODEL", "sarvam-105b")
+
+DIGIT_WORDS = {
+    "zero": "0",
+    "oh": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
 
 
 class SarvamError(RuntimeError):
-    """Wraps any Sarvam SDK/network error so main.py can catch one type."""
-    pass
+    """Wrap Sarvam SDK, configuration, and network failures."""
 
 
-_client = None
+def normalize_challenge_text(text: str) -> list[str]:
+    """Normalize punctuation, common CHAABI spellings, and spoken digits."""
+    normalized = unicodedata.normalize("NFKC", text).lower()
+    tokens = re.findall(r"[a-z]+|\d+", normalized)
+    result: list[str] = []
+    for token in tokens:
+        if token in {"chabi", "chaabi"}:
+            result.append("chaabi")
+        elif token in DIGIT_WORDS:
+            result.append(DIGIT_WORDS[token])
+        elif token.isdigit():
+            result.extend(token)
+        else:
+            result.append(token)
+    return result
 
 
-def _get_client() -> SarvamAI:
-    global _client
-    if _client is None:
-        if not SARVAM_API_KEY:
-            raise SarvamError(
-                "SARVAM_API_KEY is not set. Copy .env.example to .env and "
-                "paste your key from https://dashboard.sarvam.ai"
-            )
-        _client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
-    return _client
+def challenge_matches_transcript(challenge_prompt: str, transcript: str) -> bool:
+    """Perform the primary deterministic security comparison."""
+    return normalize_challenge_text(challenge_prompt) == normalize_challenge_text(transcript)
 
 
-def transcribe_codemix(audio_bytes: bytes) -> str:
-    """Send raw audio bytes to Sarvam STT (code-mixed mode) and return the transcript.
+def challenge_digits_match(challenge_prompt: str, transcript: str) -> bool:
+    """Ensure an LLM can never override a changed challenge number."""
+    expected = [token for token in normalize_challenge_text(challenge_prompt) if token.isdigit()]
+    actual = [token for token in normalize_challenge_text(transcript) if token.isdigit()]
+    return bool(expected) and expected == actual
 
-    The SDK wants a file object, so this writes the bytes to a temp .wav file
-    first. If your frontend records webm/ogg (typical for the browser
-    MediaRecorder API), convert to wav before calling this - see the
-    "Audio format" note in README.md.
-    """
-    client = _get_client()
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
+
+def _client():
+    api_key = os.getenv("SARVAM_API_KEY")
+    if not api_key:
+        raise SarvamError("SARVAM_API_KEY is not configured.")
     try:
-        with open(tmp_path, "rb") as f:
-            response = client.speech_to_text.transcribe(
-                file=f,
+        from sarvamai import SarvamAI
+    except ImportError as error:
+        raise SarvamError("Install the sarvamai package before using live STT.") from error
+    return SarvamAI(api_subscription_key=api_key)
+
+
+def transcribe_english(audio_bytes: bytes) -> str:
+    """Transcribe the app's English-only WAV challenge using Sarvam."""
+    temporary_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temporary_file:
+            temporary_file.write(audio_bytes)
+            temporary_path = temporary_file.name
+        with open(temporary_path, "rb") as audio_file:
+            response = _client().speech_to_text.transcribe(
+                file=audio_file,
                 model=STT_MODEL,
-                language_code="unknown",  # auto-detect, needed for code-mixed speech
-                mode="codemix",
+                language_code=STT_LANGUAGE_CODE,
+                mode=STT_MODE,
             )
-        return response.transcript
-    except Exception as e:
-        raise SarvamError(str(e)) from e
+        return str(response.transcript)
+    except SarvamError:
+        raise
+    except Exception as error:
+        raise SarvamError(str(error)) from error
     finally:
-        os.unlink(tmp_path)
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
 
 
 def verify_intent(challenge_prompt: str, transcript: str) -> bool:
-    """Ask sarvam-105b whether the transcript satisfies the issued challenge phrase.
-
-    Returns True/False rather than raw text so main.py doesn't have to
-    parse the model's wording.
-    """
-    client = _get_client()
-    system = (
-        "You are a strict security verifier. You are given a CHALLENGE phrase "
-        "a user was asked to say aloud, and a TRANSCRIPT of what they actually "
-        "said (possibly code-mixed Hindi/English, possibly with minor STT "
-        "errors). Reply with exactly one word: YES if the transcript conveys "
-        "the same meaning as the challenge AND any numbers match exactly, "
-        "or NO otherwise. No explanation, no punctuation, just YES or NO."
+    """Ask Sarvam for a strict semantic challenge/transcript match."""
+    system_prompt = (
+        "You are a strict security verifier. Reply with exactly YES when the "
+        "transcript matches the challenge, including every number; otherwise "
+        "reply with exactly NO."
     )
-    user = f"CHALLENGE: {challenge_prompt}\nTRANSCRIPT: {transcript}"
+    user_prompt = f"CHALLENGE: {challenge_prompt}\nTRANSCRIPT: {transcript}"
     try:
-        response = client.chat.completions(
+        response = _client().chat.completions(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
         )
-        answer = response.choices[0].message.content.strip().upper()
-        return answer.startswith("YES")
-    except Exception as e:
-        raise SarvamError(str(e)) from e
+        answer = str(response.choices[0].message.content).strip().upper()
+        return answer == "YES"
+    except SarvamError:
+        raise
+    except Exception as error:
+        raise SarvamError(str(error)) from error

@@ -22,3 +22,8 @@ backend/DSP_CONTRACT.md
 backend/E2E_TEST_REPORT.md
 backend/PHASE5_HANDOFF.md
 backend/tests/
+
+# Local runtime state
+backend/*.db
+backend/*.db-shm
+backend/*.db-wal

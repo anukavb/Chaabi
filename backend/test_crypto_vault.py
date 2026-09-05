@@ -54,7 +54,7 @@ try:
 
     print("    AUTHENTICATION SUCCESS!")
     print(
-        f"    Secret: {result.decode()}"
+        f"    Protected payload: {result.decode()}"
     )
 
 except VaultAuthenticationError as exc:
@@ -92,7 +92,7 @@ try:
 
     print("    DRIFT TEST SUCCESS!")
     print(
-        f"    Secret: {result.decode()}"
+        f"    Protected payload: {result.decode()}"
     )
 
 except VaultAuthenticationError as exc:

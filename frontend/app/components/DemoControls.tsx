@@ -1,13 +1,9 @@
-type Verdict = "auto" | "grant" | "deny";
-
 type Props = {
   accent: string;
   accentOptions?: string[];
   onAccentChange: (value: string) => void;
   scanSpeed: number;
   onScanSpeedChange: (value: number) => void;
-  forceVerdict: Verdict;
-  onForceVerdictChange: (value: Verdict) => void;
 };
 
 const label = "font-mono text-[10px] tracking-[0.14em] text-[var(--muted)]";
@@ -18,8 +14,6 @@ export default function DemoControls({
   onAccentChange,
   scanSpeed,
   onScanSpeedChange,
-  forceVerdict,
-  onForceVerdictChange,
 }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-6 rounded-[14px] border border-[var(--border)] bg-[var(--surface)] px-5 py-3.5">
@@ -54,27 +48,6 @@ export default function DemoControls({
           className="h-1 w-28 accent-[var(--signal)]"
         />
         <span className="font-mono text-[10.5px] text-[var(--ink)]">{scanSpeed.toFixed(1)}×</span>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <span className={label}>VERDICT</span>
-        <div className="flex overflow-hidden rounded-lg border border-[var(--border)]">
-          {(["auto", "grant", "deny"] as Verdict[]).map((v) => (
-            <button
-              key={v}
-              type="button"
-              aria-pressed={forceVerdict === v}
-              onClick={() => onForceVerdictChange(v)}
-              className={`px-2.5 py-1.5 font-mono text-[10px] uppercase tracking-[0.1em] transition-colors ${
-                forceVerdict === v
-                  ? "bg-white/[.08] text-[var(--ink)]"
-                  : "text-[var(--muted)] hover:bg-white/[.04]"
-              }`}
-            >
-              {v}
-            </button>
-          ))}
-        </div>
       </div>
     </div>
   );

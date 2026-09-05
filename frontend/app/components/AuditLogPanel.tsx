@@ -6,6 +6,7 @@ type Props = {
 };
 
 const TAG_CLASS: Record<EventTag, string> = {
+  ENROLL: "text-[var(--signal)] bg-[var(--signal)]/[.08]",
   GRANT: "text-[var(--ok)] bg-[var(--ok)]/[.11]",
   DENY: "text-[var(--danger)] bg-[var(--danger)]/[.10]",
   CAPTURE: "text-[var(--ink)]/80 bg-white/[.06]",
