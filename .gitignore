@@ -10,3 +10,15 @@ node_modules/
 dist/
 build/
 *.log
+
+# Private DSP calibration inputs and generated reports
+backend/calibration-data/
+backend/calibration-results/
+
+# Local Person 1 implementation notes and test suite
+backend/CALIBRATION.md
+backend/CRYPTO_DSP_CONTRACT.md
+backend/DSP_CONTRACT.md
+backend/E2E_TEST_REPORT.md
+backend/PHASE5_HANDOFF.md
+backend/tests/
