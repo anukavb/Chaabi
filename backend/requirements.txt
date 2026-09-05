@@ -9,4 +9,3 @@ cryptography
 sarvamai
 python-multipart
 python-dotenv
-httpx

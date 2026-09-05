@@ -10,7 +10,3 @@ node_modules/
 dist/
 build/
 *.log
-
-# Private DSP calibration inputs and generated reports
-backend/calibration-data/
-backend/calibration-results/
