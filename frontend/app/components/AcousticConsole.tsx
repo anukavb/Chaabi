@@ -20,6 +20,7 @@ import type {
 const API_BASE =
   process.env.NEXT_PUBLIC_CHAABI_API_URL ?? "http://localhost:8000";
 const RECORD_MS = 4000;
+const SESSION_ACTIVITY_REFRESH_MS = 60_000;
 
 type ConsoleState = "IDLE" | "RECORDING" | "PROCESSING" | "SUCCESS" | "DENIED";
 type Workflow = "enroll" | "authenticate";
@@ -30,6 +31,7 @@ type ConfigResponse = {
   enrollment_recordings: number;
   required_genuine_points: number;
   preferred_sample_rate: number;
+  minimum_enrollment_speaker_similarity: number;
 };
 
 type ChallengeResponse = {
@@ -56,6 +58,7 @@ type EnrollResponse = {
   genuine_points: number;
   speaker_threshold: number | null;
   enrollment_voice_consistency: number | null;
+  enrollment_pair_similarities: number[];
 };
 
 type DeviceCheck = {
@@ -73,6 +76,7 @@ const DEFAULT_CONFIG: ConfigResponse = {
   enrollment_recordings: 3,
   required_genuine_points: 18,
   preferred_sample_rate: 48000,
+  minimum_enrollment_speaker_similarity: 0.35,
 };
 
 const INITIAL_DEVICE_CHECK: DeviceCheck = {
@@ -118,7 +122,8 @@ function phaseCopy(
   state: ConsoleState,
   workflow: Workflow,
   enrollmentCount: number,
-  requiredRecordings: number
+  requiredRecordings: number,
+  voiceEnrolled: boolean
 ): { headline: string; subline: string } {
   if (state === "RECORDING") {
     return {
@@ -141,6 +146,12 @@ function phaseCopy(
     return { headline: "Request not completed", subline: "See the audit log for the exact reason and try again." };
   }
   if (workflow === "enroll") {
+    if (voiceEnrolled && enrollmentCount === 0) {
+      return {
+        headline: "Voice enrollment active",
+        subline: "Your voice profile is stored on this device. Enable replacement only if you want to enroll again.",
+      };
+    }
     return {
       headline: `Enrollment recording ${Math.min(enrollmentCount + 1, requiredRecordings)} of ${requiredRecordings}`,
       subline: "Three recordings let CHAABI retain repeatable formant bins and reject one-off noise.",
@@ -190,6 +201,7 @@ async function responseError(response: Response): Promise<string> {
 export default function AcousticConsole() {
   const [sessionStatus, setSessionStatus] = useState<"loading" | "authenticated" | "unauthenticated">("loading");
   const [sessionUser, setSessionUser] = useState<string | null>(null);
+  const [voiceEnrolled, setVoiceEnrolled] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [authUserId, setAuthUserId] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -238,6 +250,8 @@ export default function AcousticConsole() {
   const deviceCheckRef = useRef<DeviceCheck>(INITIAL_DEVICE_CHECK);
   const sessionUserRef = useRef<string | null>(null);
   const sessionTimerRef = useRef<number | null>(null);
+  const sessionRefreshRunningRef = useRef(false);
+  const lastActivitySessionRefreshRef = useRef(0);
 
   const appendLog = (tag: EventTag, text: string, meta?: string) => {
     setLog((previous) => [
@@ -249,9 +263,21 @@ export default function AcousticConsole() {
   function armSessionTimer(seconds: number) {
     if (sessionTimerRef.current !== null) window.clearTimeout(sessionTimerRef.current);
     sessionTimerRef.current = window.setTimeout(
-      () => expireLocalSession("Your session expired due to inactivity. Please log in again."),
+      () => void releaseTimedOutSession(),
       Math.max(1, seconds) * 1000
     );
+  }
+
+  async function releaseTimedOutSession() {
+    if (!sessionUserRef.current) return;
+    try {
+      await fetch(`${API_BASE}/api/accounts/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } finally {
+      expireLocalSession("Your session expired due to inactivity. Please log in again.");
+    }
   }
 
   function beginLocalSession(data: SessionResponse) {
@@ -259,24 +285,60 @@ export default function AcousticConsole() {
     sessionUserRef.current = data.user_id;
     setSessionUser(data.user_id);
     setUserId(data.user_id);
+    setVoiceEnrolled(data.has_voice_enrollment);
     setSessionStatus("authenticated");
     setAuthPassword("");
     setAuthError("");
+    lastActivitySessionRefreshRef.current = Date.now();
     armSessionTimer(data.expires_in_seconds);
   }
 
   function expireLocalSession(message: string) {
     stopCapture();
+    if (sessionTimerRef.current !== null) {
+      window.clearTimeout(sessionTimerRef.current);
+      sessionTimerRef.current = null;
+    }
     sessionUserRef.current = null;
     initializedRef.current = false;
     setSessionUser(null);
     setUserId("");
+    setVoiceEnrolled(false);
     setSessionStatus("unauthenticated");
     setAuthPassword("");
     setAuthError(message);
     setChallengeId(null);
     setEnrollmentRecordings([]);
     setState("IDLE");
+  }
+
+  async function refreshSessionForActivity() {
+    if (
+      !sessionUserRef.current ||
+      sessionRefreshRunningRef.current ||
+      Date.now() - lastActivitySessionRefreshRef.current < SESSION_ACTIVITY_REFRESH_MS
+    ) {
+      return;
+    }
+    sessionRefreshRunningRef.current = true;
+    lastActivitySessionRefreshRef.current = Date.now();
+    try {
+      const response = await fetch(`${API_BASE}/api/session`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const data = (await response.json()) as SessionResponse;
+      if (!data.authenticated || !data.user_id) {
+        expireLocalSession("Your session expired due to inactivity. Please log in again.");
+        return;
+      }
+      armSessionTimer(data.expires_in_seconds);
+    } catch {
+      // A temporary backend interruption should not destroy a still-valid session.
+    } finally {
+      sessionRefreshRunningRef.current = false;
+    }
   }
 
   async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
@@ -316,6 +378,19 @@ export default function AcousticConsole() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user_id: authUserId.trim(), password: authPassword }),
       });
+      if (response.status === 409) {
+        const activeResponse = await fetch(`${API_BASE}/api/session`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (activeResponse.ok) {
+          const activeSession = (await activeResponse.json()) as SessionResponse;
+          if (activeSession.authenticated && activeSession.user_id) {
+            beginLocalSession(activeSession);
+            return;
+          }
+        }
+      }
       if (!response.ok) throw new Error(await responseError(response));
       beginLocalSession((await response.json()) as SessionResponse);
     } catch (error) {
@@ -354,10 +429,15 @@ export default function AcousticConsole() {
       appendLog("DSP", "Audio device change detected", "running microphone readiness check");
       void runDeviceReadinessCheck("Audio device changed");
     };
+    const handleUserActivity = () => void refreshSessionForActivity();
     navigator.mediaDevices?.addEventListener("devicechange", handleDeviceChange);
+    window.addEventListener("pointerdown", handleUserActivity, { passive: true });
+    window.addEventListener("keydown", handleUserActivity);
     return () => {
       window.clearTimeout(restoreTimer);
       navigator.mediaDevices?.removeEventListener("devicechange", handleDeviceChange);
+      window.removeEventListener("pointerdown", handleUserActivity);
+      window.removeEventListener("keydown", handleUserActivity);
       stopCapture();
       if (lastRecordingUrlRef.current) {
         URL.revokeObjectURL(lastRecordingUrlRef.current);
@@ -801,10 +881,16 @@ export default function AcousticConsole() {
       if (!response.ok) throw new Error(await responseError(response));
       const data = (await response.json()) as EnrollResponse;
       if (!data.enrolled) {
+        const speakerDetail =
+          data.reason === "INCONSISTENT_ENROLLMENT_VOICE"
+            ? `Best pair ${data.enrollment_voice_consistency ?? "unavailable"}; required ${config.minimum_enrollment_speaker_similarity}. Pair scores: ${data.enrollment_pair_similarities.join(", ") || "unavailable"}. Try again in a quieter position and keep the same speaking distance.`
+            : data.reason;
         appendLog(
           "DENY",
           data.reason,
-          `stable bins ${data.stable_bin_count}/${data.required_genuine_points}`
+          data.reason === "INCONSISTENT_ENROLLMENT_VOICE"
+            ? speakerDetail
+            : `stable bins ${data.stable_bin_count}/${data.required_genuine_points}`
         );
         setEnrollmentRecordings([]);
         updateCheck("quality", data.reason.includes("RECORDING_") ? "failed" : "passed", data.reason);
@@ -822,7 +908,7 @@ export default function AcousticConsole() {
         updateCheck(
           "speaker",
           data.reason === "INCONSISTENT_ENROLLMENT_VOICE" ? "failed" : "skipped",
-          data.reason === "INCONSISTENT_ENROLLMENT_VOICE" ? data.reason : "Not reached."
+          data.reason === "INCONSISTENT_ENROLLMENT_VOICE" ? speakerDetail : "Not reached."
         );
         updateCheck("vault", "skipped", "Enrollment checks did not all pass.");
         setState("DENIED");
@@ -838,7 +924,7 @@ export default function AcousticConsole() {
         appendLog(
           "DSP",
           "Speaker voiceprint enrolled",
-          `consistency ${data.enrollment_voice_consistency ?? "—"} · acceptance threshold ${data.speaker_threshold}`
+          `best-pair consistency ${data.enrollment_voice_consistency ?? "—"} · acceptance threshold ${data.speaker_threshold} · pair scores ${data.enrollment_pair_similarities.join(", ")}`
         );
       }
       setConfidence(100);
@@ -848,10 +934,12 @@ export default function AcousticConsole() {
       updateCheck(
         "speaker",
         "passed",
-        `Minimum enrollment similarity ${data.enrollment_voice_consistency ?? "available"}.`
+        `Best-pair enrollment similarity ${data.enrollment_voice_consistency ?? "available"}; required ${config.minimum_enrollment_speaker_similarity}.`
       );
       updateCheck("vault", "passed", `${data.genuine_points} genuine points sealed with chaff.`);
       setState("SUCCESS");
+      setVoiceEnrolled(true);
+      setReplaceExisting(false);
       setEnrollmentRecordings([]);
       setChallenge(enrollmentPrompt(config, 0));
     } catch (error) {
@@ -983,7 +1071,7 @@ export default function AcousticConsole() {
         data.speaker.matched ? "passed" : "failed",
         data.speaker.similarity === null
           ? data.speaker.error ?? "Speaker comparison was unavailable."
-          : `Best-two average ${data.speaker.similarity}; required ${data.speaker.threshold}. Templates ${data.speaker.template_similarities.join(", ")}.`
+          : `Second-best template ${data.speaker.similarity}; required ${data.speaker.threshold}. Templates ${data.speaker.template_similarities.join(", ")}.`
       );
     } else {
       updateCheck(
@@ -1118,12 +1206,13 @@ export default function AcousticConsole() {
     state,
     workflow,
     enrollmentRecordings.length,
-    config.enrollment_recordings
+    config.enrollment_recordings,
+    voiceEnrolled
   );
   const busy = state === "RECORDING" || state === "PROCESSING";
   const captureLabel =
     workflow === "enroll"
-      ? `RECORD ${Math.min(enrollmentRecordings.length + 1, config.enrollment_recordings)}/${config.enrollment_recordings}`
+      ? `${voiceEnrolled ? "RE-ENROLL" : "RECORD"} ${Math.min(enrollmentRecordings.length + 1, config.enrollment_recordings)}/${config.enrollment_recordings}`
       : "VERIFY";
 
   return (
@@ -1141,7 +1230,18 @@ export default function AcousticConsole() {
         <section className="flex flex-wrap items-center gap-4 rounded-[14px] border border-[var(--border)] bg-[var(--surface)] px-5 py-4">
           <div className="min-w-[220px] flex-1">
             <span className="font-mono text-[10px] tracking-[0.14em] text-[var(--muted)]">SIGNED IN USER</span>
-            <p className="mt-1 font-mono text-sm text-[var(--ink)]">{sessionUser}</p>
+            <div className="mt-1 flex flex-wrap items-center gap-3">
+              <p className="font-mono text-sm text-[var(--ink)]">{sessionUser}</p>
+              <span
+                className={`rounded-full border px-2.5 py-1 font-mono text-[9px] tracking-[0.12em] ${
+                  voiceEnrolled
+                    ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-300"
+                    : "border-amber-400/40 bg-amber-400/10 text-amber-200"
+                }`}
+              >
+                {voiceEnrolled ? "VOICE PROFILE ENROLLED" : "VOICE ENROLLMENT REQUIRED"}
+              </span>
+            </div>
           </div>
           {workflow === "enroll" ? (
             <label className="flex items-center gap-2.5 font-mono text-[10px] tracking-[0.1em] text-[var(--muted)]">
@@ -1228,6 +1328,7 @@ export default function AcousticConsole() {
               disabled={
                 !backendUp ||
                 !userId.trim() ||
+                (workflow === "enroll" && voiceEnrolled && !replaceExisting) ||
                 (workflow === "authenticate" && !challengeId)
               }
             />

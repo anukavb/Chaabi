@@ -4,6 +4,7 @@ pydantic
 numpy
 scipy
 librosa
+speechbrain>=1.1,<2.0
 reedsolo
 cryptography
 sarvamai

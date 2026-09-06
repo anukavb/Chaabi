@@ -29,7 +29,7 @@ from crypto_vault import (
     stable_formant_bins_from_dsp,
     unlock_vault_with_details,
 )
-from dsp_engine import AudioProcessingError, extract_speaker_embedding, process_audio_buffer
+from dsp_engine import AudioProcessingError, process_audio_buffer
 from sarvam_client import (
     SarvamError,
     challenge_digits_match,
@@ -52,11 +52,13 @@ from storage import (
     vault_exists,
 )
 from speaker_verification import (
+    MIN_ENROLLMENT_SIMILARITY,
     PROFILE_VERSION,
     SpeakerVerificationError,
     build_speaker_profile,
     compare_speaker,
 )
+from speaker_model import extract_speaker_embedding
 
 
 logging.basicConfig(level=logging.INFO)
@@ -80,7 +82,7 @@ AUTH_FAILURE_LIMIT = int(os.getenv("CHAABI_AUTH_FAILURE_LIMIT", "5"))
 AUTH_FAILURE_WINDOW_SECONDS = int(
     os.getenv("CHAABI_AUTH_FAILURE_WINDOW_SECONDS", "300")
 )
-DSP_VERSION = "lpc-formants-mfcc-multitemplate-v3"
+DSP_VERSION = "lpc-formants-ecapa-multitemplate-v4"
 ENROLLMENT_RECORDINGS = 3
 ENROLLMENT_MINIMUM_SUPPORT = 2
 ENROLLMENT_PROMPTS = (
@@ -145,6 +147,7 @@ class ConfigResponse(BaseModel):
     enrollment_recordings: int
     required_genuine_points: int
     preferred_sample_rate: int
+    minimum_enrollment_speaker_similarity: float
 
 
 class ChallengeResponse(BaseModel):
@@ -176,6 +179,7 @@ class EnrollResponse(BaseModel):
     genuine_points: int = 0
     speaker_threshold: float | None = None
     enrollment_voice_consistency: float | None = None
+    enrollment_pair_similarities: list[float] = Field(default_factory=list)
 
 
 class SpeakerResult(BaseModel):
@@ -507,6 +511,7 @@ def get_config(request: Request) -> ConfigResponse:
         enrollment_recordings=ENROLLMENT_RECORDINGS,
         required_genuine_points=required_feature_count(),
         preferred_sample_rate=48_000,
+        minimum_enrollment_speaker_similarity=MIN_ENROLLMENT_SIMILARITY,
     )
 
 
@@ -592,13 +597,18 @@ async def enroll(
 
     try:
         speaker_profile = build_speaker_profile(speaker_embeddings)
-    except SpeakerVerificationError:
+    except SpeakerVerificationError as exc:
+        pairwise_similarities = exc.pairwise_similarities
         return EnrollResponse(
             enrolled=False,
             user_id=clean_user_id,
             reason="INCONSISTENT_ENROLLMENT_VOICE",
             stable_bin_count=len(stable_bins),
             required_genuine_points=required,
+            enrollment_voice_consistency=(
+                max(pairwise_similarities) if pairwise_similarities else None
+            ),
+            enrollment_pair_similarities=pairwise_similarities,
         )
 
     vault = generate_vault_from_bins(stable_bins[:required])
@@ -629,7 +639,10 @@ async def enroll(
         genuine_points=int(vault["coefficient_count"]),
         speaker_threshold=float(speaker_profile["threshold"]),
         enrollment_voice_consistency=float(
-            speaker_profile["enrollment_min_similarity"]
+            speaker_profile["enrollment_consistency"]
+        ),
+        enrollment_pair_similarities=list(
+            speaker_profile["enrollment_pair_similarities"]
         ),
     )
 
